@@ -1,0 +1,5 @@
+# Vraie configuration (flux perso) : locale uniquement, la démo est src/config.example.php.
+/src/config.php
+
+# Réglages de l'IDE.
+/.idea/
