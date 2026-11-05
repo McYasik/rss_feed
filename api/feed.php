@@ -2,7 +2,13 @@
 // Même règle que feeds.php : configuration locale si présente, démo versionnée sinon.
 $config_file = __DIR__ . '/../src/config.php';
 require file_exists($config_file) ? $config_file : __DIR__ . '/../src/config.example.php';
+require __DIR__ . '/../src/fetch.php';
 $config = get_config();
+
+// Réglages réservés au serveur : fichier à part, jamais transmis au front ni régénéré par
+// l'éditeur (qui réécrit config.php en entier). Absent, tout est désactivé.
+$server_file = __DIR__ . '/../src/server.php';
+$server      = file_exists($server_file) ? require $server_file : [];
 
 header('Content-Type: application/json; charset=utf-8');
 header('Cache-Control: public, max-age=' . $config->cache_ttl);
@@ -14,23 +20,28 @@ if (!filter_var($url, FILTER_VALIDATE_URL)) {
     exit;
 }
 
-$ctx = stream_context_create(['http' => [
-    'timeout'    => 10,
-    'user_agent' => 'RSS-Aggregator/1.0',
-]]);
+// Liste blanche : seuls les flux de la configuration enregistrée sont servis, désactivés
+// compris (ils peuvent être réactivés depuis l'éditeur).
+if (!empty($server['feed_whitelist']) && !in_array($url, array_column(feeds(), 'url'), true)) {
+    http_response_code(403);
+    echo json_encode(['error' => 'Flux hors liste blanche (enregistrer la configuration)']);
+    exit;
+}
 
-$xml_str = @file_get_contents($url, false, $ctx);
-$status  = isset($http_response_header[0]) ? $http_response_header[0] : '';
+$result = safe_fetch($url, 10);
+if ($result['error'] === 'refused') {
+    http_response_code(400);
+    echo json_encode(['error' => 'Adresse refusée (http/https public uniquement)']);
+    exit;
+}
+$xml_str = $result['body'];
+$status  = (string) $result['status'];
 
 // Cloudflare bloque les clients non navigateurs (ex. KHInsider) : on repasse par r.jina.ai,
 // dont le navigateur headless franchit le challenge. Son rendu texte préfixe le XML d'une
 // phrase de la visionneuse et décode les entités, d'où la découpe et le ré-échappement des &.
-if ($xml_str === false && str_contains($status, '403')) {
-    $proxy_ctx = stream_context_create(['http' => [
-        'timeout' => 30,
-        'header'  => "X-Return-Format: text\r\n",
-    ]]);
-    $text  = @file_get_contents('https://r.jina.ai/' . $url, false, $proxy_ctx);
+if ($xml_str === false && $status === '403') {
+    $text  = safe_fetch('https://r.jina.ai/' . $url, 30, ['X-Return-Format: text'])['body'];
     $start = $text === false ? false : strpos($text, '<rss');
     if ($start === false && $text !== false) {
         $start = strpos($text, '<rdf:RDF');
@@ -41,7 +52,7 @@ if ($xml_str === false && str_contains($status, '403')) {
 }
 
 if ($xml_str === false) {
-    $msg = str_contains($status, '403') ? 'Flux bloqué (Cloudflare/403)' : 'Flux inaccessible';
+    $msg = $status === '403' ?'Flux bloqué (Cloudflare/403)' : 'Flux inaccessible';
     http_response_code(502);
     echo json_encode(['error' => $msg]);
     exit;
